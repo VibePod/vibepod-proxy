@@ -2,18 +2,60 @@
 
 from __future__ import annotations
 
+import json
+import os
+from pathlib import Path
+
 from mitmproxy import ctx, http
 
 from db import ProxyDB, get_db_path
+
+_DEFAULT_MAPPING_PATH = Path("/data/containers.json")
+
+
+class ContainerResolver:
+    """Resolves client IPs to container metadata via a shared JSON file."""
+
+    def __init__(self, path: Path = _DEFAULT_MAPPING_PATH) -> None:
+        self._path = path
+        self._mtime: float = 0.0
+        self._mapping: dict[str, dict[str, str]] = {}
+
+    def resolve(self, ip: str | None) -> tuple[str | None, str | None]:
+        """Return (container_id, container_name) for the given IP."""
+        if ip is None:
+            return None, None
+        self._maybe_reload()
+        entry = self._mapping.get(ip)
+        if entry is None:
+            return None, None
+        return entry.get("container_id"), entry.get("container_name")
+
+    def _maybe_reload(self) -> None:
+        try:
+            st = os.stat(self._path)
+        except OSError:
+            return
+        if st.st_mtime == self._mtime:
+            return
+        try:
+            data = json.loads(self._path.read_text())
+            if isinstance(data, dict):
+                self._mapping = data
+            self._mtime = st.st_mtime
+        except (json.JSONDecodeError, OSError):
+            pass
 
 
 class SQLiteLogger:
     def __init__(self) -> None:
         self._db: ProxyDB | None = None
+        self._resolver: ContainerResolver | None = None
 
     def load(self, loader):  # type: ignore[override]
         db_path = get_db_path()
         self._db = ProxyDB(db_path)
+        self._resolver = ContainerResolver()
         ctx.log.info(f"Logging HTTP traffic to {db_path}")
 
     def done(self) -> None:
@@ -36,17 +78,28 @@ class SQLiteLogger:
         client_ip = None
         client_port = None
         if flow.client_conn.address:
-            client_ip, client_port = flow.client_conn.address
+            client_addr = flow.client_conn.address
+            client_ip = client_addr[0]
+            client_port = client_addr[1] if len(client_addr) > 1 else None
 
         server_ip = None
         server_port = None
         if flow.server_conn.address:
-            server_ip, server_port = flow.server_conn.address
+            server_addr = flow.server_conn.address
+            server_ip = server_addr[0]
+            server_port = server_addr[1] if len(server_addr) > 1 else None
+
+        source_container_id = None
+        source_container_name = None
+        if self._resolver is not None:
+            source_container_id, source_container_name = self._resolver.resolve(client_ip)
 
         record = self._db.build_request(
             request_id=flow.id,
             timestamp=flow.request.timestamp_start,
             method=flow.request.method,
+            source_container_id=source_container_id,
+            source_container_name=source_container_name,
             scheme=flow.request.scheme,
             host=flow.request.host,
             port=flow.request.port,

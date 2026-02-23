@@ -15,6 +15,8 @@ CREATE TABLE IF NOT EXISTS http_requests (
     id          TEXT PRIMARY KEY,
     timestamp   TEXT NOT NULL,
     method      TEXT NOT NULL,
+    source_container_id   TEXT,
+    source_container_name TEXT,
     scheme      TEXT,
     host        TEXT,
     port        INTEGER,
@@ -51,7 +53,9 @@ CREATE TABLE IF NOT EXISTS http_errors (
 
 CREATE INDEX IF NOT EXISTS idx_http_requests_ts ON http_requests(timestamp);
 CREATE INDEX IF NOT EXISTS idx_http_requests_host ON http_requests(host);
+CREATE INDEX IF NOT EXISTS idx_http_requests_source_container_name ON http_requests(source_container_name);
 CREATE INDEX IF NOT EXISTS idx_http_responses_req ON http_responses(request_id);
+
 """
 
 
@@ -69,6 +73,8 @@ class RequestRecord:
     request_id: str
     timestamp: str
     method: str
+    source_container_id: str | None
+    source_container_name: str | None
     scheme: str | None
     host: str | None
     port: int | None
@@ -110,6 +116,7 @@ class ProxyDB:
         self._conn = sqlite3.connect(str(self._path), check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA)
+        self._migrate_schema()
 
     def close(self) -> None:
         self._conn.close()
@@ -117,13 +124,16 @@ class ProxyDB:
     def insert_request(self, record: RequestRecord) -> None:
         self._conn.execute(
             "INSERT OR REPLACE INTO http_requests "
-            "(id, timestamp, method, scheme, host, port, path, query, url, headers, body, "
+            "(id, timestamp, method, source_container_id, source_container_name, "
+            "scheme, host, port, path, query, url, headers, body, "
             "client_ip, client_port, server_ip, server_port) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 record.request_id,
                 record.timestamp,
                 record.method,
+                record.source_container_id,
+                record.source_container_name,
                 record.scheme,
                 record.host,
                 record.port,
@@ -172,6 +182,8 @@ class ProxyDB:
         request_id: str,
         timestamp: float | None,
         method: str,
+        source_container_id: str | None,
+        source_container_name: str | None,
         scheme: str | None,
         host: str | None,
         port: int | None,
@@ -189,6 +201,8 @@ class ProxyDB:
             request_id=request_id,
             timestamp=_iso(timestamp),
             method=method,
+            source_container_id=source_container_id,
+            source_container_name=source_container_name,
             scheme=scheme,
             host=host,
             port=port,
@@ -202,6 +216,19 @@ class ProxyDB:
             server_ip=server_ip,
             server_port=server_port,
         )
+
+    def _migrate_schema(self) -> None:
+        """Backfill columns on existing databases created by older versions."""
+        self._ensure_column("http_requests", "source_container_id", "TEXT")
+        self._ensure_column("http_requests", "source_container_name", "TEXT")
+
+    def _ensure_column(self, table: str, column: str, definition: str) -> None:
+        rows = self._conn.execute(f"PRAGMA table_info({table})").fetchall()
+        existing = {str(row[1]) for row in rows}
+        if column in existing:
+            return
+        self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        self._conn.commit()
 
     @staticmethod
     def build_response(
