@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 
-from mitmproxy import ctx, http
+from mitmproxy import ctx, http, websocket
 
 from db import ProxyDB, get_db_path
 
@@ -147,6 +147,38 @@ class SQLiteLogger:
             message=str(err) if err else None,
         )
         self._db.insert_error(record)
+
+
+    def websocket_message(self, flow: http.HTTPFlow) -> None:
+        if self._db is None:
+            return
+
+        if flow.websocket is None or not flow.websocket.messages:
+            return
+
+        msg = flow.websocket.messages[-1]
+        direction = "client_to_server" if msg.from_client else "server_to_client"
+        if msg.type == websocket.Opcode.BINARY:
+            msg_type = "binary"
+        elif msg.type == websocket.Opcode.TEXT:
+            msg_type = "text"
+        else:
+            return
+
+        content: bytes
+        if isinstance(msg.content, str):
+            content = msg.content.encode("utf-8")
+        else:
+            content = msg.content or b""
+
+        record = self._db.build_websocket_message(
+            request_id=flow.id,
+            timestamp=msg.timestamp,
+            direction=direction,
+            msg_type=msg_type,
+            content=content,
+        )
+        self._db.insert_websocket_message(record)
 
 
 addons = [SQLiteLogger()]
