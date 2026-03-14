@@ -31,3 +31,7 @@ File format (`/data/containers.json`):
   }
 }
 ```
+
+## License
+
+MIT — see [LICENSE](LICENSE)
