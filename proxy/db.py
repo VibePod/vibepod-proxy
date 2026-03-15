@@ -51,10 +51,20 @@ CREATE TABLE IF NOT EXISTS http_errors (
     message     TEXT
 );
 
+CREATE TABLE IF NOT EXISTS websocket_messages (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id  TEXT NOT NULL REFERENCES http_requests(id),
+    timestamp   TEXT NOT NULL,
+    direction   TEXT NOT NULL,
+    type        TEXT NOT NULL,
+    content     BLOB
+);
+
 CREATE INDEX IF NOT EXISTS idx_http_requests_ts ON http_requests(timestamp);
 CREATE INDEX IF NOT EXISTS idx_http_requests_host ON http_requests(host);
 CREATE INDEX IF NOT EXISTS idx_http_requests_source_container_name ON http_requests(source_container_name);
 CREATE INDEX IF NOT EXISTS idx_http_responses_req ON http_responses(request_id);
+CREATE INDEX IF NOT EXISTS idx_websocket_messages_req ON websocket_messages(request_id);
 
 """
 
@@ -109,11 +119,21 @@ class ErrorRecord:
     message: str | None
 
 
+@dataclass
+class WebSocketMessageRecord:
+    request_id: str
+    timestamp: str
+    direction: str  # "client_to_server" or "server_to_client"
+    type: str       # "text" or "binary"
+    content: bytes
+
+
 class ProxyDB:
     def __init__(self, path: str | Path) -> None:
         self._path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self._path), check_same_thread=False)
+        self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA)
         self._migrate_schema()
@@ -168,6 +188,14 @@ class ProxyDB:
         )
         self._conn.commit()
 
+    def insert_websocket_message(self, record: WebSocketMessageRecord) -> None:
+        self._conn.execute(
+            "INSERT INTO websocket_messages (request_id, timestamp, direction, type, content) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (record.request_id, record.timestamp, record.direction, record.type, record.content),
+        )
+        self._conn.commit()
+
     def insert_error(self, record: ErrorRecord) -> None:
         self._conn.execute(
             "INSERT INTO http_errors (request_id, timestamp, error_type, message) "
@@ -215,6 +243,23 @@ class ProxyDB:
             client_port=client_port,
             server_ip=server_ip,
             server_port=server_port,
+        )
+
+    @staticmethod
+    def build_websocket_message(
+        *,
+        request_id: str,
+        timestamp: float | None,
+        direction: str,
+        msg_type: str,
+        content: bytes | None,
+    ) -> WebSocketMessageRecord:
+        return WebSocketMessageRecord(
+            request_id=request_id,
+            timestamp=_iso(timestamp),
+            direction=direction,
+            type=msg_type,
+            content=content or b"",
         )
 
     def _migrate_schema(self) -> None:
