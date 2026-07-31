@@ -6,9 +6,8 @@ import json
 import os
 from pathlib import Path
 
-from mitmproxy import ctx, http, websocket
-
 from db import ProxyDB, get_db_path
+from mitmproxy import ctx, http, websocket
 
 _DEFAULT_MAPPING_PATH = Path("/data/containers.json")
 
@@ -92,7 +91,9 @@ class SQLiteLogger:
         source_container_id = None
         source_container_name = None
         if self._resolver is not None:
-            source_container_id, source_container_name = self._resolver.resolve(client_ip)
+            source_container_id, source_container_name = self._resolver.resolve(
+                client_ip,
+            )
 
         record = self._db.build_request(
             request_id=flow.id,
@@ -147,7 +148,6 @@ class SQLiteLogger:
             message=str(err) if err else None,
         )
         self._db.insert_error(record)
-
 
     def websocket_message(self, flow: http.HTTPFlow) -> None:
         if self._db is None:

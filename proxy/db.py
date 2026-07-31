@@ -5,10 +5,10 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterable
 
 _SCHEMA = """\
 CREATE TABLE IF NOT EXISTS http_requests (
@@ -62,7 +62,8 @@ CREATE TABLE IF NOT EXISTS websocket_messages (
 
 CREATE INDEX IF NOT EXISTS idx_http_requests_ts ON http_requests(timestamp);
 CREATE INDEX IF NOT EXISTS idx_http_requests_host ON http_requests(host);
-CREATE INDEX IF NOT EXISTS idx_http_requests_source_container_name ON http_requests(source_container_name);
+CREATE INDEX IF NOT EXISTS idx_http_requests_source_container_name
+    ON http_requests(source_container_name);
 CREATE INDEX IF NOT EXISTS idx_http_responses_req ON http_responses(request_id);
 CREATE INDEX IF NOT EXISTS idx_websocket_messages_req ON websocket_messages(request_id);
 
@@ -70,8 +71,8 @@ CREATE INDEX IF NOT EXISTS idx_websocket_messages_req ON websocket_messages(requ
 
 
 def _iso(ts: float | None) -> str:
-    value = ts if ts is not None else datetime.now(timezone.utc).timestamp()
-    return datetime.fromtimestamp(value, tz=timezone.utc).isoformat()
+    value = ts if ts is not None else datetime.now(UTC).timestamp()
+    return datetime.fromtimestamp(value, tz=UTC).isoformat()
 
 
 def _json_list(items: Iterable[tuple[str, str]]) -> str:
@@ -124,7 +125,7 @@ class WebSocketMessageRecord:
     request_id: str
     timestamp: str
     direction: str  # "client_to_server" or "server_to_client"
-    type: str       # "text" or "binary"
+    type: str  # "text" or "binary"
     content: bytes
 
 
@@ -192,7 +193,13 @@ class ProxyDB:
         self._conn.execute(
             "INSERT INTO websocket_messages (request_id, timestamp, direction, type, content) "
             "VALUES (?, ?, ?, ?, ?)",
-            (record.request_id, record.timestamp, record.direction, record.type, record.content),
+            (
+                record.request_id,
+                record.timestamp,
+                record.direction,
+                record.type,
+                record.content,
+            ),
         )
         self._conn.commit()
 
