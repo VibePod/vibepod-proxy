@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS http_requests (
     client_ip   TEXT,
     client_port INTEGER,
     server_ip   TEXT,
-    server_port INTEGER
+    server_port INTEGER,
+    blocked     INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS http_responses (
@@ -98,6 +99,7 @@ class RequestRecord:
     client_port: int | None
     server_ip: str | None
     server_port: int | None
+    blocked: int = 0
 
 
 @dataclass
@@ -136,8 +138,10 @@ class ProxyDB:
         self._conn = sqlite3.connect(str(self._path), check_same_thread=False)
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.executescript(_SCHEMA)
+        # Backfill columns first: _SCHEMA's indexes reference columns that
+        # databases from older versions may not have yet.
         self._migrate_schema()
+        self._conn.executescript(_SCHEMA)
 
     def close(self) -> None:
         self._conn.close()
@@ -147,8 +151,8 @@ class ProxyDB:
             "INSERT OR REPLACE INTO http_requests "
             "(id, timestamp, method, source_container_id, source_container_name, "
             "scheme, host, port, path, query, url, headers, body, "
-            "client_ip, client_port, server_ip, server_port) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "client_ip, client_port, server_ip, server_port, blocked) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 record.request_id,
                 record.timestamp,
@@ -167,6 +171,7 @@ class ProxyDB:
                 record.client_port,
                 record.server_ip,
                 record.server_port,
+                record.blocked,
             ),
         )
         self._conn.commit()
@@ -231,6 +236,7 @@ class ProxyDB:
         client_port: int | None,
         server_ip: str | None,
         server_port: int | None,
+        blocked: bool = False,
     ) -> RequestRecord:
         return RequestRecord(
             request_id=request_id,
@@ -250,6 +256,7 @@ class ProxyDB:
             client_port=client_port,
             server_ip=server_ip,
             server_port=server_port,
+            blocked=1 if blocked else 0,
         )
 
     @staticmethod
@@ -273,9 +280,13 @@ class ProxyDB:
         """Backfill columns on existing databases created by older versions."""
         self._ensure_column("http_requests", "source_container_id", "TEXT")
         self._ensure_column("http_requests", "source_container_name", "TEXT")
+        self._ensure_column("http_requests", "blocked", "INTEGER NOT NULL DEFAULT 0")
 
     def _ensure_column(self, table: str, column: str, definition: str) -> None:
         rows = self._conn.execute(f"PRAGMA table_info({table})").fetchall()
+        if not rows:
+            # Table does not exist yet; _SCHEMA will create it in full.
+            return
         existing = {str(row[1]) for row in rows}
         if column in existing:
             return
