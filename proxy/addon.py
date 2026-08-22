@@ -8,8 +8,17 @@ from pathlib import Path
 
 from db import ProxyDB, get_db_path
 from mitmproxy import ctx, http, websocket
+from policy import FilterPolicy
 
 _DEFAULT_MAPPING_PATH = Path("/data/containers.json")
+
+
+def _blocked_response(host: str | None) -> http.Response:
+    return http.Response.make(
+        403,
+        json.dumps({"error": "blocked by vibepod proxy filter", "host": host}).encode("utf-8"),
+        {"content-type": "application/json"},
+    )
 
 
 class ContainerResolver:
@@ -50,20 +59,76 @@ class SQLiteLogger:
     def __init__(self) -> None:
         self._db: ProxyDB | None = None
         self._resolver: ContainerResolver | None = None
+        self._policy: FilterPolicy | None = None
 
     def load(self, loader):  # type: ignore[override]
         db_path = get_db_path()
         self._db = ProxyDB(db_path)
         self._resolver = ContainerResolver()
+        self._policy = FilterPolicy()
         ctx.log.info(f"Logging HTTP traffic to {db_path}")
 
     def done(self) -> None:
         if self._db is not None:
             self._db.close()
 
+    def _client_address(self, flow: http.HTTPFlow) -> tuple[str | None, int | None]:
+        if not flow.client_conn.address:
+            return None, None
+        addr = flow.client_conn.address
+        return addr[0], addr[1] if len(addr) > 1 else None
+
+    def http_connect(self, flow: http.HTTPFlow) -> None:
+        if self._db is None or self._policy is None:
+            return
+        host = flow.request.host
+        if not self._policy.is_blocked(host):
+            return
+
+        # Refuse the tunnel before any persistence: a logging failure must
+        # never let a blocked connection through.
+        flow.response = _blocked_response(host)
+
+        client_ip, client_port = self._client_address(flow)
+        source_container_id = None
+        source_container_name = None
+        if self._resolver is not None:
+            source_container_id, source_container_name = self._resolver.resolve(client_ip)
+
+        record = self._db.build_request(
+            request_id=flow.id,
+            timestamp=flow.request.timestamp_start,
+            method="CONNECT",
+            source_container_id=source_container_id,
+            source_container_name=source_container_name,
+            scheme=None,
+            host=host,
+            port=flow.request.port,
+            path=None,
+            query=None,
+            url=f"{host}:{flow.request.port}",
+            headers=[],
+            body=None,
+            client_ip=client_ip,
+            client_port=client_port,
+            server_ip=None,
+            server_port=None,
+            blocked=True,
+        )
+        self._db.insert_request(record)
+
     def request(self, flow: http.HTTPFlow) -> None:
         if self._db is None:
             return
+
+        # flow.request.host is the real connection target; pretty_host prefers
+        # the client-controlled Host header and would be spoofable.
+        blocked = False
+        if self._policy is not None:
+            blocked = self._policy.is_blocked(flow.request.host)
+        if blocked:
+            # Set before any persistence so logging failures never fail open.
+            flow.response = _blocked_response(flow.request.host)
 
         query_value = None
         query_raw = getattr(flow.request, "query_string", None)
@@ -74,12 +139,7 @@ class SQLiteLogger:
         elif flow.request.query:
             query_value = str(flow.request.query)
 
-        client_ip = None
-        client_port = None
-        if flow.client_conn.address:
-            client_addr = flow.client_conn.address
-            client_ip = client_addr[0]
-            client_port = client_addr[1] if len(client_addr) > 1 else None
+        client_ip, client_port = self._client_address(flow)
 
         server_ip = None
         server_port = None
@@ -113,6 +173,7 @@ class SQLiteLogger:
             client_port=client_port,
             server_ip=server_ip,
             server_port=server_port,
+            blocked=blocked,
         )
         self._db.insert_request(record)
 
