@@ -8,7 +8,13 @@ from pathlib import Path
 from db import ProxyDB
 
 
-def _insert(db: ProxyDB, request_id: str, blocked: bool) -> None:
+def _insert(
+    db: ProxyDB,
+    request_id: str,
+    blocked: bool,
+    filter_mode: str | None = None,
+    block_reason: str | None = None,
+) -> None:
     record = db.build_request(
         request_id=request_id,
         timestamp=None,
@@ -28,6 +34,8 @@ def _insert(db: ProxyDB, request_id: str, blocked: bool) -> None:
         server_ip=None,
         server_port=None,
         blocked=blocked,
+        filter_mode=filter_mode,
+        block_reason=block_reason,
     )
     db.insert_request(record)
 
@@ -70,6 +78,38 @@ def test_blocked_defaults_to_false(tmp_path: Path) -> None:
     db.close()
 
 
+def test_filter_mode_and_block_reason_persisted(tmp_path: Path) -> None:
+    db_path = tmp_path / "proxy.db"
+    db = ProxyDB(db_path)
+    _insert(db, "req-1", blocked=True, filter_mode="allow", block_reason="allow-miss")
+    _insert(db, "req-2", blocked=True, filter_mode="deny", block_reason="deny-match")
+    _insert(db, "req-3", blocked=False, filter_mode="open")
+    db.close()
+
+    conn = sqlite3.connect(db_path)
+    rows = {
+        row[0]: (row[1], row[2])
+        for row in conn.execute("SELECT id, filter_mode, block_reason FROM http_requests")
+    }
+    conn.close()
+    assert rows == {
+        "req-1": ("allow", "allow-miss"),
+        "req-2": ("deny", "deny-match"),
+        "req-3": ("open", None),
+    }
+
+
+def test_filter_mode_and_block_reason_default_to_none(tmp_path: Path) -> None:
+    db = ProxyDB(tmp_path / "proxy.db")
+    _insert(db, "req-1", blocked=False)
+    db.close()
+
+    conn = sqlite3.connect(tmp_path / "proxy.db")
+    row = conn.execute("SELECT filter_mode, block_reason FROM http_requests").fetchone()
+    conn.close()
+    assert row == (None, None)
+
+
 def test_migration_adds_blocked_column(tmp_path: Path) -> None:
     """Databases created before the blocked column gain it on open."""
     db_path = tmp_path / "proxy.db"
@@ -90,3 +130,5 @@ def test_migration_adds_blocked_column(tmp_path: Path) -> None:
     columns = {row[1] for row in conn.execute("PRAGMA table_info(http_requests)")}
     conn.close()
     assert "blocked" in columns
+    assert "filter_mode" in columns
+    assert "block_reason" in columns

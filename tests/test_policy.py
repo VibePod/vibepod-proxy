@@ -94,6 +94,28 @@ def test_unknown_mode_fails_open(tmp_path: Path) -> None:
     assert not policy.is_blocked("example.com")
 
 
+def test_block_reason_none_in_open_mode(tmp_path: Path) -> None:
+    policy = make_policy(tmp_path, "open", deny=["example.com"])
+    assert policy.block_reason("example.com") is None
+
+
+def test_block_reason_deny_match(tmp_path: Path) -> None:
+    policy = make_policy(tmp_path, "deny", deny=["example.com"])
+    assert policy.block_reason("example.com") == "deny-match"
+    assert policy.block_reason("other.com") is None
+
+
+def test_block_reason_allow_miss(tmp_path: Path) -> None:
+    policy = make_policy(tmp_path, "allow", allow=["api.anthropic.com"])
+    assert policy.block_reason("example.com") == "allow-miss"
+    assert policy.block_reason("api.anthropic.com") is None
+
+
+def test_block_reason_none_host(tmp_path: Path) -> None:
+    policy = make_policy(tmp_path, "allow", allow=["api.anthropic.com"])
+    assert policy.block_reason(None) is None
+
+
 def test_hot_reload_picks_up_changes(tmp_path: Path) -> None:
     filter_path = tmp_path / "filter.json"
     _write(filter_path, "open")

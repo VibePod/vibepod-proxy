@@ -29,7 +29,9 @@ CREATE TABLE IF NOT EXISTS http_requests (
     client_port INTEGER,
     server_ip   TEXT,
     server_port INTEGER,
-    blocked     INTEGER NOT NULL DEFAULT 0
+    blocked     INTEGER NOT NULL DEFAULT 0,
+    filter_mode TEXT,
+    block_reason TEXT
 );
 
 CREATE TABLE IF NOT EXISTS http_responses (
@@ -100,6 +102,8 @@ class RequestRecord:
     server_ip: str | None
     server_port: int | None
     blocked: int = 0
+    filter_mode: str | None = None
+    block_reason: str | None = None
 
 
 @dataclass
@@ -151,8 +155,9 @@ class ProxyDB:
             "INSERT OR REPLACE INTO http_requests "
             "(id, timestamp, method, source_container_id, source_container_name, "
             "scheme, host, port, path, query, url, headers, body, "
-            "client_ip, client_port, server_ip, server_port, blocked) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "client_ip, client_port, server_ip, server_port, blocked, "
+            "filter_mode, block_reason) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 record.request_id,
                 record.timestamp,
@@ -172,6 +177,8 @@ class ProxyDB:
                 record.server_ip,
                 record.server_port,
                 record.blocked,
+                record.filter_mode,
+                record.block_reason,
             ),
         )
         self._conn.commit()
@@ -237,6 +244,8 @@ class ProxyDB:
         server_ip: str | None,
         server_port: int | None,
         blocked: bool = False,
+        filter_mode: str | None = None,
+        block_reason: str | None = None,
     ) -> RequestRecord:
         return RequestRecord(
             request_id=request_id,
@@ -257,6 +266,8 @@ class ProxyDB:
             server_ip=server_ip,
             server_port=server_port,
             blocked=1 if blocked else 0,
+            filter_mode=filter_mode,
+            block_reason=block_reason,
         )
 
     @staticmethod
@@ -281,6 +292,8 @@ class ProxyDB:
         self._ensure_column("http_requests", "source_container_id", "TEXT")
         self._ensure_column("http_requests", "source_container_name", "TEXT")
         self._ensure_column("http_requests", "blocked", "INTEGER NOT NULL DEFAULT 0")
+        self._ensure_column("http_requests", "filter_mode", "TEXT")
+        self._ensure_column("http_requests", "block_reason", "TEXT")
 
     def _ensure_column(self, table: str, column: str, definition: str) -> None:
         rows = self._conn.execute(f"PRAGMA table_info({table})").fetchall()

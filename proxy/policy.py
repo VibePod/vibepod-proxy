@@ -46,13 +46,21 @@ class FilterPolicy:
         return self._mode
 
     def is_blocked(self, host: str | None) -> bool:
+        return self.block_reason(host) is not None
+
+    def block_reason(self, host: str | None) -> str | None:
+        """Why a host is blocked: "deny-match", "allow-miss", or None (not blocked)."""
         self._maybe_reload()
         if host is None or self._mode == "open":
-            return False
+            return None
         normalized = host.lower().rstrip(".")
         if self._mode == "allow":
-            return not any(_matches(p, normalized) for p in self._allow)
-        return any(_matches(p, normalized) for p in self._deny)
+            if any(_matches(p, normalized) for p in self._allow):
+                return None
+            return "allow-miss"
+        if any(_matches(p, normalized) for p in self._deny):
+            return "deny-match"
+        return None
 
     def _maybe_reload(self) -> None:
         try:

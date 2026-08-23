@@ -98,6 +98,67 @@ def test_open_mode_unchanged_behavior(tmp_path: Path, monkeypatch) -> None:
     assert _rows(tmp_path) == [("GET", "example.com", 0)]
 
 
+def _mode_reason_rows(tmp_path: Path) -> list[tuple]:
+    conn = sqlite3.connect(tmp_path / "proxy.db")
+    rows = conn.execute(
+        "SELECT host, blocked, filter_mode, block_reason FROM http_requests",
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def test_deny_match_records_mode_and_reason(tmp_path: Path, monkeypatch) -> None:
+    logger = _setup(tmp_path, monkeypatch, {"mode": "deny", "deny": ["example.com"]})
+    with taddons.context(logger):
+        logger.load(None)
+        logger.request(_flow("example.com"))
+        logger.done()
+
+    assert _mode_reason_rows(tmp_path) == [("example.com", 1, "deny", "deny-match")]
+
+
+def test_allow_miss_records_mode_and_reason(tmp_path: Path, monkeypatch) -> None:
+    logger = _setup(tmp_path, monkeypatch, {"mode": "allow", "allow": ["api.anthropic.com"]})
+    with taddons.context(logger):
+        logger.load(None)
+        logger.request(_flow("example.com"))
+        logger.done()
+
+    assert _mode_reason_rows(tmp_path) == [("example.com", 1, "allow", "allow-miss")]
+
+
+def test_allowed_request_records_mode_without_reason(tmp_path: Path, monkeypatch) -> None:
+    logger = _setup(tmp_path, monkeypatch, {"mode": "allow", "allow": ["example.com"]})
+    with taddons.context(logger):
+        logger.load(None)
+        logger.request(_flow("example.com"))
+        logger.done()
+
+    assert _mode_reason_rows(tmp_path) == [("example.com", 0, "allow", None)]
+
+
+def test_open_mode_records_mode_without_reason(tmp_path: Path, monkeypatch) -> None:
+    logger = _setup(tmp_path, monkeypatch, {"mode": "open", "deny": ["example.com"]})
+    with taddons.context(logger):
+        logger.load(None)
+        logger.request(_flow("example.com"))
+        logger.done()
+
+    assert _mode_reason_rows(tmp_path) == [("example.com", 0, "open", None)]
+
+
+def test_blocked_connect_records_mode_and_reason(tmp_path: Path, monkeypatch) -> None:
+    logger = _setup(tmp_path, monkeypatch, {"mode": "allow", "allow": ["api.anthropic.com"]})
+    with taddons.context(logger):
+        logger.load(None)
+        flow = _flow("example.com")
+        flow.request.method = "CONNECT"
+        logger.http_connect(flow)
+        logger.done()
+
+    assert _mode_reason_rows(tmp_path) == [("example.com", 1, "allow", "allow-miss")]
+
+
 def test_host_header_spoof_does_not_bypass_filter(tmp_path: Path, monkeypatch) -> None:
     """The Host header is client-controlled; blocking must use the real target."""
     logger = _setup(tmp_path, monkeypatch, {"mode": "deny", "deny": ["example.com"]})

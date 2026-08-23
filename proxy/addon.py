@@ -82,7 +82,8 @@ class SQLiteLogger:
         if self._db is None or self._policy is None:
             return
         host = flow.request.host
-        if not self._policy.is_blocked(host):
+        reason = self._policy.block_reason(host)
+        if reason is None:
             return
 
         # Refuse the tunnel before any persistence: a logging failure must
@@ -114,6 +115,8 @@ class SQLiteLogger:
             server_ip=None,
             server_port=None,
             blocked=True,
+            filter_mode=self._policy.mode,
+            block_reason=reason,
         )
         self._db.insert_request(record)
 
@@ -123,9 +126,12 @@ class SQLiteLogger:
 
         # flow.request.host is the real connection target; pretty_host prefers
         # the client-controlled Host header and would be spoofable.
-        blocked = False
+        reason = None
+        filter_mode = None
         if self._policy is not None:
-            blocked = self._policy.is_blocked(flow.request.host)
+            reason = self._policy.block_reason(flow.request.host)
+            filter_mode = self._policy.mode
+        blocked = reason is not None
         if blocked:
             # Set before any persistence so logging failures never fail open.
             flow.response = _blocked_response(flow.request.host)
@@ -174,6 +180,8 @@ class SQLiteLogger:
             server_ip=server_ip,
             server_port=server_port,
             blocked=blocked,
+            filter_mode=filter_mode,
+            block_reason=reason,
         )
         self._db.insert_request(record)
 

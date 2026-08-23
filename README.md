@@ -56,6 +56,12 @@ Blocked requests get a `403` (HTTPS tunnels are refused at `CONNECT`) and are
 logged to `http_requests` with `blocked = 1`. A missing or malformed
 `filter.json` disables filtering (fail-open).
 
+Every logged request also records the policy that was active when it was
+handled: `filter_mode` (`open`, `allow`, or `deny`) and, for blocked rows,
+`block_reason` — `deny-match` (host matched the `deny` list) or `allow-miss`
+(host matched nothing on the `allow` list). Rows written before this column
+existed have `NULL` in both.
+
 Additional environment variable: `PROXY_FILTER_PATH` (default `/data/filter.json`).
 
 ## License
