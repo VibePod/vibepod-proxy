@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -16,6 +17,18 @@ VALID_MODES = frozenset({"open", "allow", "deny"})
 def get_filter_path() -> Path:
     env = os.environ.get("PROXY_FILTER_PATH")
     return Path(env) if env else _DEFAULT_FILTER_PATH
+
+
+@dataclass(frozen=True)
+class FilterDecision:
+    """Mode and block reason taken from one policy snapshot."""
+
+    mode: str
+    reason: str | None
+
+    @property
+    def blocked(self) -> bool:
+        return self.reason is not None
 
 
 def _matches(pattern: str, host: str) -> bool:
@@ -46,21 +59,31 @@ class FilterPolicy:
         return self._mode
 
     def is_blocked(self, host: str | None) -> bool:
-        return self.block_reason(host) is not None
+        return self.evaluate(host).blocked
 
     def block_reason(self, host: str | None) -> str | None:
         """Why a host is blocked: "deny-match", "allow-miss", or None (not blocked)."""
+        return self.evaluate(host).reason
+
+    def evaluate(self, host: str | None) -> FilterDecision:
+        """Decide on *host* and report the mode from the same policy snapshot.
+
+        Callers that log the mode alongside the decision must use this instead
+        of separate block_reason()/mode calls: each of those reloads the file,
+        so a hot reload in between could pair a reason with the wrong mode.
+        """
         self._maybe_reload()
-        if host is None or self._mode == "open":
-            return None
+        mode = self._mode
+        if host is None or mode == "open":
+            return FilterDecision(mode, None)
         normalized = host.lower().rstrip(".")
-        if self._mode == "allow":
+        if mode == "allow":
             if any(_matches(p, normalized) for p in self._allow):
-                return None
-            return "allow-miss"
+                return FilterDecision(mode, None)
+            return FilterDecision(mode, "allow-miss")
         if any(_matches(p, normalized) for p in self._deny):
-            return "deny-match"
-        return None
+            return FilterDecision(mode, "deny-match")
+        return FilterDecision(mode, None)
 
     def _maybe_reload(self) -> None:
         try:

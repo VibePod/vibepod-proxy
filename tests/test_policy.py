@@ -185,3 +185,22 @@ def test_reload_on_atomic_replace_with_same_size_and_mtime(tmp_path: Path) -> No
 
     assert policy.is_blocked("new-host.com")
     assert not policy.is_blocked("old-host.com")
+
+
+def test_evaluate_returns_mode_and_reason_together(tmp_path: Path) -> None:
+    policy = make_policy(tmp_path, "deny", deny=["example.com"])
+    decision = policy.evaluate("example.com")
+    assert decision.mode == "deny"
+    assert decision.reason == "deny-match"
+    assert decision.blocked
+
+    decision = policy.evaluate("other.com")
+    assert decision.mode == "deny"
+    assert decision.reason is None
+    assert not decision.blocked
+
+
+def test_evaluate_allow_miss(tmp_path: Path) -> None:
+    policy = make_policy(tmp_path, "allow", allow=["api.anthropic.com"])
+    assert policy.evaluate("example.com").reason == "allow-miss"
+    assert policy.evaluate("api.anthropic.com").reason is None

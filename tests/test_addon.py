@@ -225,3 +225,29 @@ def test_request_stays_blocked_when_logging_fails(tmp_path: Path, monkeypatch) -
 
     assert flow.response is not None
     assert flow.response.status_code == 403
+
+
+def test_mode_and_reason_come_from_one_policy_snapshot(tmp_path: Path, monkeypatch) -> None:
+    """A hot reload between decision and logging must not mix old and new policy."""
+    from policy import FilterPolicy
+
+    logger = _setup(tmp_path, monkeypatch, {"mode": "deny", "deny": ["example.com"]})
+    with taddons.context(logger):
+        logger.load(None)
+        real_evaluate = FilterPolicy.evaluate
+
+        def evaluate_then_reload(self, host):
+            decision = real_evaluate(self, host)
+            # Simulate a hot reload landing right after the decision was taken.
+            self._mode = "open"
+            self._deny = []
+            return decision
+
+        monkeypatch.setattr(FilterPolicy, "evaluate", evaluate_then_reload)
+        flow = _flow("example.com")
+        logger.request(flow)
+        logger.done()
+
+    assert flow.response is not None
+    assert flow.response.status_code == 403
+    assert _mode_reason_rows(tmp_path) == [("example.com", 1, "deny", "deny-match")]
