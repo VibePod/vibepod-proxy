@@ -31,7 +31,10 @@ def _pop_policy_identity(flow: http.HTTPFlow) -> tuple[str | None, bool]:
     raw = flow.request.headers.pop("Proxy-Authorization", None)
     if raw is None or not raw.lower().startswith("basic "):
         return None, False
-    encoded = raw.split(None, 1)[1]
+    parts = raw.split(None, 1)
+    if len(parts) < 2:
+        return None, False
+    encoded = parts[1]
     try:
         decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
     except (binascii.Error, UnicodeDecodeError):

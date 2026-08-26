@@ -346,6 +346,42 @@ def test_invalid_reserved_policy_identity_fails_closed(tmp_path: Path, monkeypat
     ]
 
 
+def test_empty_basic_credentials_do_not_bypass_request_filter(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A crafted 'Basic ' header must not crash the hook and skip enforcement."""
+    logger = _setup(tmp_path, monkeypatch, {"mode": "deny", "deny": ["example.com"]})
+    with taddons.context(logger):
+        logger.load(None)
+        flow = _flow("example.com")
+        flow.request.headers["Proxy-Authorization"] = "Basic "
+        logger.request(flow)
+        logger.done()
+
+    assert flow.response is not None
+    assert flow.response.status_code == 403
+    assert _rows(tmp_path) == [("GET", "example.com", 1)]
+
+
+def test_empty_basic_credentials_do_not_bypass_connect_filter(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    logger = _setup(tmp_path, monkeypatch, {"mode": "allow", "allow": ["api.anthropic.com"]})
+    with taddons.context(logger):
+        logger.load(None)
+        flow = _flow("example.com")
+        flow.request.method = "CONNECT"
+        flow.request.headers["Proxy-Authorization"] = "Basic "
+        logger.http_connect(flow)
+        logger.done()
+
+    assert flow.response is not None
+    assert flow.response.status_code == 403
+    assert _rows(tmp_path) == [("CONNECT", "example.com", 1)]
+
+
 def test_connect_consumes_policy_identity_header(tmp_path: Path, monkeypatch) -> None:
     policy_id = "4" * 32
     logger = _setup(tmp_path, monkeypatch, {"mode": "open", "allow": [], "deny": []})
