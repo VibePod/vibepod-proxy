@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import os
+import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from db import ProxyDB, get_db_path
 from mitmproxy import ctx, http, websocket
-from policy import FilterPolicy
+from policy import FilterDecision, PolicyStore
 
 _DEFAULT_MAPPING_PATH = Path("/data/containers.json")
+_POLICY_USERNAME_RE = re.compile(r"^vp-([0-9a-f]{32})$")
 
 
 def _blocked_response(host: str | None) -> http.Response:
@@ -21,6 +26,31 @@ def _blocked_response(host: str | None) -> http.Response:
     )
 
 
+def _pop_policy_identity(flow: http.HTTPFlow) -> tuple[str | None, bool]:
+    """Consume VibePod proxy credentials and return (policy_id, invalid_reserved)."""
+    raw = flow.request.headers.pop("Proxy-Authorization", None)
+    if raw is None or not raw.lower().startswith("basic "):
+        return None, False
+    encoded = raw.split(None, 1)[1]
+    try:
+        decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError):
+        return None, False
+    username = decoded.split(":", 1)[0]
+    if not username.startswith("vp-"):
+        return None, False
+    match = _POLICY_USERNAME_RE.fullmatch(username)
+    return (match.group(1), False) if match else (None, True)
+
+
+@dataclass(frozen=True)
+class ContainerMetadata:
+    container_id: str | None = None
+    container_name: str | None = None
+    policy_id: str | None = None
+    profile: str | None = None
+
+
 class ContainerResolver:
     """Resolves client IPs to container metadata via a shared JSON file."""
 
@@ -29,15 +59,20 @@ class ContainerResolver:
         self._mtime: float = 0.0
         self._mapping: dict[str, dict[str, str]] = {}
 
-    def resolve(self, ip: str | None) -> tuple[str | None, str | None]:
-        """Return (container_id, container_name) for the given IP."""
+    def resolve(self, ip: str | None) -> ContainerMetadata:
+        """Return mapped metadata for the given client IP."""
         if ip is None:
-            return None, None
+            return ContainerMetadata()
         self._maybe_reload()
         entry = self._mapping.get(ip)
         if entry is None:
-            return None, None
-        return entry.get("container_id"), entry.get("container_name")
+            return ContainerMetadata()
+        return ContainerMetadata(
+            container_id=entry.get("container_id"),
+            container_name=entry.get("container_name"),
+            policy_id=entry.get("policy_id"),
+            profile=entry.get("profile"),
+        )
 
     def _maybe_reload(self) -> None:
         try:
@@ -59,13 +94,15 @@ class SQLiteLogger:
     def __init__(self) -> None:
         self._db: ProxyDB | None = None
         self._resolver: ContainerResolver | None = None
-        self._policy: FilterPolicy | None = None
+        self._policy: PolicyStore | None = None
 
     def load(self, loader):  # type: ignore[override]
         db_path = get_db_path()
         self._db = ProxyDB(db_path)
-        self._resolver = ContainerResolver()
-        self._policy = FilterPolicy()
+        data_dir = Path(os.environ.get("PROXY_DATA_DIR", "/data"))
+        mapping_path = Path(os.environ.get("PROXY_MAPPING_PATH", data_dir / "containers.json"))
+        self._resolver = ContainerResolver(mapping_path)
+        self._policy = PolicyStore(data_dir)
         ctx.log.info(f"Logging HTTP traffic to {db_path}")
 
     def done(self) -> None:
@@ -78,11 +115,26 @@ class SQLiteLogger:
         addr = flow.client_conn.address
         return addr[0], addr[1] if len(addr) > 1 else None
 
+    def _request_policy(
+        self,
+        flow: http.HTTPFlow,
+    ) -> tuple[FilterDecision, ContainerMetadata, str | None, int | None]:
+        client_ip, client_port = self._client_address(flow)
+        metadata = ContainerMetadata()
+        if self._resolver is not None:
+            metadata = self._resolver.resolve(client_ip)
+        supplied_id, invalid_identity = _pop_policy_identity(flow)
+        policy_id = metadata.policy_id or supplied_id
+        if metadata.policy_id is None and invalid_identity:
+            policy_id = "invalid"
+        assert self._policy is not None
+        return self._policy.evaluate(flow.request.host, policy_id), metadata, client_ip, client_port
+
     def http_connect(self, flow: http.HTTPFlow) -> None:
         if self._db is None or self._policy is None:
             return
         host = flow.request.host
-        decision = self._policy.evaluate(host)
+        decision, metadata, client_ip, client_port = self._request_policy(flow)
         if not decision.blocked:
             return
 
@@ -90,18 +142,12 @@ class SQLiteLogger:
         # never let a blocked connection through.
         flow.response = _blocked_response(host)
 
-        client_ip, client_port = self._client_address(flow)
-        source_container_id = None
-        source_container_name = None
-        if self._resolver is not None:
-            source_container_id, source_container_name = self._resolver.resolve(client_ip)
-
         record = self._db.build_request(
             request_id=flow.id,
             timestamp=flow.request.timestamp_start,
             method="CONNECT",
-            source_container_id=source_container_id,
-            source_container_name=source_container_name,
+            source_container_id=metadata.container_id,
+            source_container_name=metadata.container_name,
             scheme=None,
             host=host,
             port=flow.request.port,
@@ -126,10 +172,8 @@ class SQLiteLogger:
 
         # flow.request.host is the real connection target; pretty_host prefers
         # the client-controlled Host header and would be spoofable.
-        decision = None
-        if self._policy is not None:
-            decision = self._policy.evaluate(flow.request.host)
-        blocked = decision is not None and decision.blocked
+        decision, metadata, client_ip, client_port = self._request_policy(flow)
+        blocked = decision.blocked
         if blocked:
             # Set before any persistence so logging failures never fail open.
             flow.response = _blocked_response(flow.request.host)
@@ -143,8 +187,6 @@ class SQLiteLogger:
         elif flow.request.query:
             query_value = str(flow.request.query)
 
-        client_ip, client_port = self._client_address(flow)
-
         server_ip = None
         server_port = None
         if flow.server_conn.address:
@@ -152,19 +194,12 @@ class SQLiteLogger:
             server_ip = server_addr[0]
             server_port = server_addr[1] if len(server_addr) > 1 else None
 
-        source_container_id = None
-        source_container_name = None
-        if self._resolver is not None:
-            source_container_id, source_container_name = self._resolver.resolve(
-                client_ip,
-            )
-
         record = self._db.build_request(
             request_id=flow.id,
             timestamp=flow.request.timestamp_start,
             method=flow.request.method,
-            source_container_id=source_container_id,
-            source_container_name=source_container_name,
+            source_container_id=metadata.container_id,
+            source_container_name=metadata.container_name,
             scheme=flow.request.scheme,
             host=flow.request.host,
             port=flow.request.port,
@@ -178,8 +213,8 @@ class SQLiteLogger:
             server_ip=server_ip,
             server_port=server_port,
             blocked=blocked,
-            filter_mode=decision.mode if decision is not None else None,
-            block_reason=decision.reason if decision is not None else None,
+            filter_mode=decision.mode,
+            block_reason=decision.reason,
         )
         self._db.insert_request(record)
 
