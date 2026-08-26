@@ -6,7 +6,9 @@ import json
 import os
 from pathlib import Path
 
-from policy import FilterPolicy
+from policy import FilterPolicy, PolicyStore
+
+POLICY_ID = "4f4dbceea7034d198014979d8f2ca79b"
 
 
 def _write(
@@ -204,3 +206,165 @@ def test_evaluate_allow_miss(tmp_path: Path) -> None:
     policy = make_policy(tmp_path, "allow", allow=["api.anthropic.com"])
     assert policy.evaluate("example.com").reason == "allow-miss"
     assert policy.evaluate("api.anthropic.com").reason is None
+
+
+def _write_json(path: Path, data: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def _write_container_policy(
+    tmp_path: Path,
+    *,
+    profile: str = "work",
+    project_filter: dict[str, object] | None = None,
+    env_mode: str | None = None,
+) -> None:
+    _write_json(
+        tmp_path / "policies" / "containers" / f"{POLICY_ID}.json",
+        {
+            "version": 2,
+            "policy_id": POLICY_ID,
+            "profile": profile,
+            "project_filter": project_filter,
+            "env_mode": env_mode,
+        },
+    )
+
+
+def test_policy_store_uses_global_policy_for_unidentified_client(tmp_path: Path) -> None:
+    _write_json(
+        tmp_path / "filter.json",
+        {"version": 2, "mode": "deny", "allow": [], "deny": ["example.com"]},
+    )
+    store = PolicyStore(tmp_path)
+
+    decision = store.evaluate("example.com", policy_id=None)
+
+    assert (decision.mode, decision.reason) == ("deny", "deny-match")
+
+
+def test_policy_store_explicit_profile_replaces_project_filter(tmp_path: Path) -> None:
+    _write_json(
+        tmp_path / "filter.json",
+        {"version": 2, "mode": "open", "allow": [], "deny": []},
+    )
+    _write_json(
+        tmp_path / "policies" / "profiles" / "work.json",
+        {
+            "version": 2,
+            "profile": "work",
+            "mode": "allow",
+            "allow": ["api.anthropic.com"],
+            "deny": [],
+        },
+    )
+    _write_container_policy(
+        tmp_path,
+        project_filter={"mode": "deny", "deny": ["example.com"]},
+    )
+    store = PolicyStore(tmp_path)
+
+    assert store.evaluate("example.com", policy_id=POLICY_ID).reason == "allow-miss"
+    assert store.evaluate("api.anthropic.com", policy_id=POLICY_ID).reason is None
+
+
+def test_policy_store_inherited_profile_applies_project_then_environment(tmp_path: Path) -> None:
+    _write_json(
+        tmp_path / "filter.json",
+        {
+            "version": 2,
+            "mode": "allow",
+            "allow": ["api.anthropic.com"],
+            "deny": [],
+        },
+    )
+    _write_container_policy(
+        tmp_path,
+        project_filter={"deny": ["example.com"]},
+        env_mode="deny",
+    )
+    store = PolicyStore(tmp_path)
+
+    decision = store.evaluate("example.com", policy_id=POLICY_ID)
+
+    assert (decision.mode, decision.reason) == ("deny", "deny-match")
+    assert store.evaluate("other.com", policy_id=POLICY_ID).reason is None
+
+
+def test_policy_store_resolves_profile_without_global_filter(tmp_path: Path) -> None:
+    """A valid profile file must resolve even when no global filter.json exists."""
+    _write_json(
+        tmp_path / "policies" / "profiles" / "work.json",
+        {
+            "version": 2,
+            "profile": "work",
+            "mode": "allow",
+            "allow": ["api.anthropic.com"],
+            "deny": [],
+        },
+    )
+    _write_container_policy(tmp_path)
+    store = PolicyStore(tmp_path)
+
+    assert store.evaluate("api.anthropic.com", policy_id=POLICY_ID).reason is None
+    assert store.evaluate("example.com", policy_id=POLICY_ID).reason == "allow-miss"
+
+
+def test_policy_store_global_filter_honors_env_path(tmp_path: Path, monkeypatch) -> None:
+    """PROXY_FILTER_PATH relocates the global filter file the store reads."""
+    custom = tmp_path / "custom" / "filter.json"
+    _write_json(
+        custom,
+        {"version": 2, "mode": "deny", "allow": [], "deny": ["example.com"]},
+    )
+    monkeypatch.setenv("PROXY_FILTER_PATH", str(custom))
+    store = PolicyStore(tmp_path)
+
+    decision = store.evaluate("example.com", policy_id=None)
+
+    assert (decision.mode, decision.reason) == ("deny", "deny-match")
+
+
+def test_policy_store_missing_identified_policy_fails_closed(tmp_path: Path) -> None:
+    _write_json(
+        tmp_path / "filter.json",
+        {"version": 2, "mode": "open", "allow": [], "deny": []},
+    )
+    store = PolicyStore(tmp_path)
+
+    decision = store.evaluate("example.com", policy_id=POLICY_ID)
+
+    assert (decision.mode, decision.reason) == ("unavailable", "policy-unavailable")
+    assert decision.blocked
+
+
+def test_policy_store_reloads_referenced_profile_after_atomic_replace(tmp_path: Path) -> None:
+    _write_json(
+        tmp_path / "filter.json",
+        {"version": 2, "mode": "open", "allow": [], "deny": []},
+    )
+    profile_path = tmp_path / "policies" / "profiles" / "work.json"
+    _write_json(
+        profile_path,
+        {"version": 2, "profile": "work", "mode": "open", "allow": [], "deny": []},
+    )
+    _write_container_policy(tmp_path)
+    store = PolicyStore(tmp_path)
+    assert store.evaluate("example.com", policy_id=POLICY_ID).reason is None
+
+    replacement = profile_path.with_suffix(".new")
+    _write_json(
+        replacement,
+        {
+            "version": 2,
+            "profile": "work",
+            "mode": "deny",
+            "allow": [],
+            "deny": ["example.com"],
+        },
+    )
+    os.replace(replacement, profile_path)
+
+    decision = store.evaluate("example.com", policy_id=POLICY_ID)
+    assert (decision.mode, decision.reason) == ("deny", "deny-match")
