@@ -9,6 +9,7 @@ import sqlite3
 from pathlib import Path
 
 import addon as addon_mod
+import container as container_mod
 from mitmproxy import http
 from mitmproxy.test import taddons, tflow
 
@@ -317,7 +318,7 @@ def test_source_mapping_overrides_conflicting_supplied_identity(
             },
         ),
     )
-    monkeypatch.setattr(addon_mod, "_DEFAULT_MAPPING_PATH", tmp_path / "containers.json")
+    monkeypatch.setattr(container_mod, "_DEFAULT_MAPPING_PATH", tmp_path / "containers.json")
     with taddons.context(logger):
         logger.load(None)
         assert logger._resolver is not None
