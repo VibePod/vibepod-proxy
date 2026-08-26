@@ -7,14 +7,17 @@ import binascii
 import json
 import os
 import re
-from dataclasses import dataclass
 from pathlib import Path
 
+from container import ContainerMetadata, ContainerResolver
 from db import ProxyDB, get_db_path
 from mitmproxy import ctx, http, websocket
 from policy import FilterDecision, PolicyStore
 
-_DEFAULT_MAPPING_PATH = Path("/data/containers.json")
+# NOTE: mitmproxy runs this file as a script module that is absent from
+# sys.modules, which breaks @dataclass on classes with string annotations.
+# Define dataclasses in a sibling module (see container.py) and import them.
+
 _POLICY_USERNAME_RE = re.compile(r"^vp-([0-9a-f]{32})$")
 
 
@@ -46,53 +49,6 @@ def _pop_policy_identity(flow: http.HTTPFlow) -> tuple[str | None, bool]:
     del flow.request.headers["Proxy-Authorization"]
     match = _POLICY_USERNAME_RE.fullmatch(username)
     return (match.group(1), False) if match else (None, True)
-
-
-@dataclass(frozen=True)
-class ContainerMetadata:
-    container_id: str | None = None
-    container_name: str | None = None
-    policy_id: str | None = None
-    profile: str | None = None
-
-
-class ContainerResolver:
-    """Resolves client IPs to container metadata via a shared JSON file."""
-
-    def __init__(self, path: Path = _DEFAULT_MAPPING_PATH) -> None:
-        self._path = path
-        self._mtime: float = 0.0
-        self._mapping: dict[str, dict[str, str]] = {}
-
-    def resolve(self, ip: str | None) -> ContainerMetadata:
-        """Return mapped metadata for the given client IP."""
-        if ip is None:
-            return ContainerMetadata()
-        self._maybe_reload()
-        entry = self._mapping.get(ip)
-        if entry is None:
-            return ContainerMetadata()
-        return ContainerMetadata(
-            container_id=entry.get("container_id"),
-            container_name=entry.get("container_name"),
-            policy_id=entry.get("policy_id"),
-            profile=entry.get("profile"),
-        )
-
-    def _maybe_reload(self) -> None:
-        try:
-            st = os.stat(self._path)
-        except OSError:
-            return
-        if st.st_mtime == self._mtime:
-            return
-        try:
-            data = json.loads(self._path.read_text())
-            if isinstance(data, dict):
-                self._mapping = data
-            self._mtime = st.st_mtime
-        except (json.JSONDecodeError, OSError):
-            pass
 
 
 class SQLiteLogger:
