@@ -382,6 +382,20 @@ def test_empty_basic_credentials_do_not_bypass_connect_filter(
     assert _rows(tmp_path) == [("CONNECT", "example.com", 1)]
 
 
+def test_unrelated_proxy_authorization_is_preserved(tmp_path: Path, monkeypatch) -> None:
+    """Only reserved vp- credentials are consumed; other creds reach the upstream."""
+    logger = _setup(tmp_path, monkeypatch, {"mode": "open", "allow": [], "deny": []})
+    header = "Basic " + base64.b64encode(b"someuser:secret").decode()
+    with taddons.context(logger):
+        logger.load(None)
+        flow = _flow("example.com")
+        flow.request.headers["Proxy-Authorization"] = header
+        logger.request(flow)
+        logger.done()
+
+    assert flow.request.headers.get("Proxy-Authorization") == header
+
+
 def test_connect_consumes_policy_identity_header(tmp_path: Path, monkeypatch) -> None:
     policy_id = "4" * 32
     logger = _setup(tmp_path, monkeypatch, {"mode": "open", "allow": [], "deny": []})

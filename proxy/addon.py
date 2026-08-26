@@ -28,7 +28,7 @@ def _blocked_response(host: str | None) -> http.Response:
 
 def _pop_policy_identity(flow: http.HTTPFlow) -> tuple[str | None, bool]:
     """Consume VibePod proxy credentials and return (policy_id, invalid_reserved)."""
-    raw = flow.request.headers.pop("Proxy-Authorization", None)
+    raw = flow.request.headers.get("Proxy-Authorization")
     if raw is None or not raw.lower().startswith("basic "):
         return None, False
     parts = raw.split(None, 1)
@@ -41,7 +41,9 @@ def _pop_policy_identity(flow: http.HTTPFlow) -> tuple[str | None, bool]:
         return None, False
     username = decoded.split(":", 1)[0]
     if not username.startswith("vp-"):
+        # Not a VibePod identity: leave the header for an upstream proxy.
         return None, False
+    del flow.request.headers["Proxy-Authorization"]
     match = _POLICY_USERNAME_RE.fullmatch(username)
     return (match.group(1), False) if match else (None, True)
 
@@ -130,7 +132,8 @@ class SQLiteLogger:
         policy_id = metadata.policy_id or supplied_id
         if metadata.policy_id is None and invalid_identity:
             policy_id = "invalid"
-        assert self._policy is not None
+        if self._policy is None:
+            raise RuntimeError("policy store is not loaded")
         return self._policy.evaluate(flow.request.host, policy_id), metadata, client_ip, client_port
 
     def http_connect(self, flow: http.HTTPFlow) -> None:

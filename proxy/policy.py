@@ -152,7 +152,11 @@ class PolicyStore:
         return data
 
     def _global_settings(self) -> FilterSettings:
-        return _settings(self._read_json(self._data_dir / "filter.json"), schema_required=False)
+        # Honor a relocated global filter file (documented PROXY_FILTER_PATH);
+        # otherwise it lives at the data dir's root, next to the policies tree.
+        env = os.environ.get("PROXY_FILTER_PATH")
+        path = Path(env) if env else self._data_dir / "filter.json"
+        return _settings(self._read_json(path), schema_required=False)
 
     def _container_policy(self, policy_id: str) -> ContainerPolicy:
         if not _POLICY_ID_RE.fullmatch(policy_id):
@@ -180,14 +184,15 @@ class PolicyStore:
 
     def _resolved_settings(self, policy_id: str) -> FilterSettings:
         record = self._container_policy(policy_id)
-        global_settings = self._global_settings()
         profile_path = self._data_dir / "policies" / "profiles" / f"{record.profile}.json"
         try:
             raw: dict[str, object] = _settings_dict(
                 _settings(self._read_json(profile_path), schema_required=True),
             )
         except FileNotFoundError:
-            raw = _settings_dict(global_settings)
+            # Only the inherited-profile fallback needs the global base, so a
+            # missing global filter.json never blocks a valid explicit profile.
+            raw = _settings_dict(self._global_settings())
             if record.project_filter is not None:
                 raw.update(record.project_filter)
         if record.env_mode is not None:
