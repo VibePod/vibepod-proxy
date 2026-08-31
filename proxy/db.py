@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS http_requests (
     method      TEXT NOT NULL,
     source_container_id   TEXT,
     source_container_name TEXT,
+    profile     TEXT,
     scheme      TEXT,
     host        TEXT,
     port        INTEGER,
@@ -67,6 +68,7 @@ CREATE INDEX IF NOT EXISTS idx_http_requests_ts ON http_requests(timestamp);
 CREATE INDEX IF NOT EXISTS idx_http_requests_host ON http_requests(host);
 CREATE INDEX IF NOT EXISTS idx_http_requests_source_container_name
     ON http_requests(source_container_name);
+CREATE INDEX IF NOT EXISTS idx_http_requests_profile ON http_requests(profile);
 CREATE INDEX IF NOT EXISTS idx_http_responses_req ON http_responses(request_id);
 CREATE INDEX IF NOT EXISTS idx_websocket_messages_req ON websocket_messages(request_id);
 
@@ -89,6 +91,7 @@ class RequestRecord:
     method: str
     source_container_id: str | None
     source_container_name: str | None
+    profile: str | None
     scheme: str | None
     host: str | None
     port: int | None
@@ -153,17 +156,18 @@ class ProxyDB:
     def insert_request(self, record: RequestRecord) -> None:
         self._conn.execute(
             "INSERT OR REPLACE INTO http_requests "
-            "(id, timestamp, method, source_container_id, source_container_name, "
+            "(id, timestamp, method, source_container_id, source_container_name, profile, "
             "scheme, host, port, path, query, url, headers, body, "
             "client_ip, client_port, server_ip, server_port, blocked, "
             "filter_mode, block_reason) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 record.request_id,
                 record.timestamp,
                 record.method,
                 record.source_container_id,
                 record.source_container_name,
+                record.profile,
                 record.scheme,
                 record.host,
                 record.port,
@@ -231,6 +235,7 @@ class ProxyDB:
         method: str,
         source_container_id: str | None,
         source_container_name: str | None,
+        profile: str | None = None,
         scheme: str | None,
         host: str | None,
         port: int | None,
@@ -253,6 +258,7 @@ class ProxyDB:
             method=method,
             source_container_id=source_container_id,
             source_container_name=source_container_name,
+            profile=profile,
             scheme=scheme,
             host=host,
             port=port,
@@ -291,6 +297,7 @@ class ProxyDB:
         """Backfill columns on existing databases created by older versions."""
         self._ensure_column("http_requests", "source_container_id", "TEXT")
         self._ensure_column("http_requests", "source_container_name", "TEXT")
+        self._ensure_column("http_requests", "profile", "TEXT")
         self._ensure_column("http_requests", "blocked", "INTEGER NOT NULL DEFAULT 0")
         self._ensure_column("http_requests", "filter_mode", "TEXT")
         self._ensure_column("http_requests", "block_reason", "TEXT")

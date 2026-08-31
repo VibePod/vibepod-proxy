@@ -14,6 +14,7 @@ def _insert(
     blocked: bool,
     filter_mode: str | None = None,
     block_reason: str | None = None,
+    profile: str | None = None,
 ) -> None:
     record = db.build_request(
         request_id=request_id,
@@ -21,6 +22,7 @@ def _insert(
         method="GET",
         source_container_id=None,
         source_container_name=None,
+        profile=profile,
         scheme="https",
         host="example.com",
         port=443,
@@ -78,6 +80,19 @@ def test_blocked_defaults_to_false(tmp_path: Path) -> None:
     db.close()
 
 
+def test_profile_persisted(tmp_path: Path) -> None:
+    db_path = tmp_path / "proxy.db"
+    db = ProxyDB(db_path)
+    _insert(db, "req-1", blocked=False, profile="work")
+    _insert(db, "req-2", blocked=False, profile=None)
+    db.close()
+
+    conn = sqlite3.connect(db_path)
+    rows = dict(conn.execute("SELECT id, profile FROM http_requests").fetchall())
+    conn.close()
+    assert rows == {"req-1": "work", "req-2": None}
+
+
 def test_filter_mode_and_block_reason_persisted(tmp_path: Path) -> None:
     db_path = tmp_path / "proxy.db"
     db = ProxyDB(db_path)
@@ -132,3 +147,4 @@ def test_migration_adds_blocked_column(tmp_path: Path) -> None:
     assert "blocked" in columns
     assert "filter_mode" in columns
     assert "block_reason" in columns
+    assert "profile" in columns
