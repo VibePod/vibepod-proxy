@@ -332,6 +332,35 @@ def test_source_mapping_overrides_conflicting_supplied_identity(
     assert _mode_reason_rows(tmp_path) == [("example.com", 1, "deny", "deny-match")]
 
 
+def test_source_mapping_profile_persisted_on_request(tmp_path: Path, monkeypatch) -> None:
+    logger = _setup(tmp_path, monkeypatch, {"mode": "open", "allow": [], "deny": []})
+    (tmp_path / "containers.json").write_text(
+        json.dumps(
+            {
+                "127.0.0.1": {
+                    "container_id": "abc123",
+                    "container_name": "vibepod-claude-test",
+                    "policy_id": None,
+                    "profile": "work",
+                },
+            },
+        ),
+    )
+    monkeypatch.setattr(container_mod, "_DEFAULT_MAPPING_PATH", tmp_path / "containers.json")
+    with taddons.context(logger):
+        logger.load(None)
+        assert logger._resolver is not None
+        logger._resolver = addon_mod.ContainerResolver(tmp_path / "containers.json")
+        flow = _flow("example.com")
+        logger.request(flow)
+        logger.done()
+
+    conn = sqlite3.connect(tmp_path / "proxy.db")
+    row = conn.execute("SELECT source_container_name, profile FROM http_requests").fetchone()
+    conn.close()
+    assert row == ("vibepod-claude-test", "work")
+
+
 def test_invalid_reserved_policy_identity_fails_closed(tmp_path: Path, monkeypatch) -> None:
     logger = _setup(tmp_path, monkeypatch, {"mode": "open", "allow": [], "deny": []})
     with taddons.context(logger):
