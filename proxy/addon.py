@@ -20,6 +20,31 @@ from policy import FilterDecision, PolicyStore
 
 _POLICY_USERNAME_RE = re.compile(r"^vp-([0-9a-f]{32})$")
 
+# Streaming RPC content types (gRPC, and Connect's streaming variants; Connect
+# unary calls use application/proto|json and stay buffered). Their message
+# streams are open-ended, so mitmproxy's default of buffering a body until
+# END_STREAM deadlocks bidirectional calls such as Cursor's agent stream.
+_STREAMING_CONTENT_TYPES = ("application/grpc", "application/connect+")
+
+
+def _is_streaming_rpc(headers: http.Headers) -> bool:
+    return headers.get("content-type", "").strip().lower().startswith(_STREAMING_CONTENT_TYPES)
+
+
+class _BodyTee:
+    """mitmproxy stream callback: forward chunks unchanged, keep a copy to log."""
+
+    def __init__(self) -> None:
+        self.body = bytearray()
+
+    def __call__(self, data: bytes) -> bytes:
+        self.body += data
+        return data
+
+
+def _tee_body(stream: object) -> bytes | None:
+    return bytes(stream.body) if isinstance(stream, _BodyTee) else None
+
 
 def _blocked_response(host: str | None) -> http.Response:
     return http.Response.make(
@@ -129,18 +154,59 @@ class SQLiteLogger:
         )
         self._db.insert_request(record)
 
+    def requestheaders(self, flow: http.HTTPFlow) -> None:
+        if self._db is None or not _is_streaming_rpc(flow.request.headers):
+            return
+
+        # Streamed headers go upstream right after this hook, and the request
+        # hook only fires once the client ends its stream: filter here.
+        decision, metadata, client_ip, client_port = self._request_policy(flow)
+        if decision.blocked:
+            # mitmproxy can't answer before the client finishes sending, and a
+            # bidi client waits for the server first, so a 403 would never
+            # arrive. Reset the stream instead, before any persistence.
+            flow.kill()
+        else:
+            flow.request.stream = _BodyTee()
+        # Log now: responses and errors can arrive before the request ends.
+        self._log_request(flow, decision, metadata, client_ip, client_port)
+
     def request(self, flow: http.HTTPFlow) -> None:
         if self._db is None:
+            return
+
+        body = _tee_body(flow.request.stream)
+        if body is not None:
+            # Already filtered and logged in requestheaders.
+            server_ip, server_port = self._server_address(flow)
+            self._db.finish_streamed_request(
+                flow.id, body=body, server_ip=server_ip, server_port=server_port
+            )
             return
 
         # flow.request.host is the real connection target; pretty_host prefers
         # the client-controlled Host header and would be spoofable.
         decision, metadata, client_ip, client_port = self._request_policy(flow)
-        blocked = decision.blocked
-        if blocked:
+        if decision.blocked:
             # Set before any persistence so logging failures never fail open.
             flow.response = _blocked_response(flow.request.host)
+        self._log_request(flow, decision, metadata, client_ip, client_port)
 
+    def _server_address(self, flow: http.HTTPFlow) -> tuple[str | None, int | None]:
+        if not flow.server_conn.address:
+            return None, None
+        addr = flow.server_conn.address
+        return addr[0], addr[1] if len(addr) > 1 else None
+
+    def _log_request(
+        self,
+        flow: http.HTTPFlow,
+        decision: FilterDecision,
+        metadata: ContainerMetadata,
+        client_ip: str | None,
+        client_port: int | None,
+    ) -> None:
+        assert self._db is not None
         query_value = None
         query_raw = getattr(flow.request, "query_string", None)
         if isinstance(query_raw, bytes):
@@ -150,12 +216,7 @@ class SQLiteLogger:
         elif flow.request.query:
             query_value = str(flow.request.query)
 
-        server_ip = None
-        server_port = None
-        if flow.server_conn.address:
-            server_addr = flow.server_conn.address
-            server_ip = server_addr[0]
-            server_port = server_addr[1] if len(server_addr) > 1 else None
+        server_ip, server_port = self._server_address(flow)
 
         record = self._db.build_request(
             request_id=flow.id,
@@ -176,15 +237,30 @@ class SQLiteLogger:
             client_port=client_port,
             server_ip=server_ip,
             server_port=server_port,
-            blocked=blocked,
+            blocked=decision.blocked,
             filter_mode=decision.mode,
             block_reason=decision.reason,
         )
         self._db.insert_request(record)
 
+    def responseheaders(self, flow: http.HTTPFlow) -> None:
+        if self._db is None or flow.response is None:
+            return
+        # A streamed request means a bidi call: the server's messages must flow
+        # while the client is still sending, whatever the response type says.
+        if _is_streaming_rpc(flow.response.headers) or isinstance(flow.request.stream, _BodyTee):
+            flow.response.stream = _BodyTee()
+
     def response(self, flow: http.HTTPFlow) -> None:
         if self._db is None:
             return
+
+        request_body = _tee_body(flow.request.stream)
+        if request_body is None:
+            request_body = flow.request.raw_content or b""
+        response_body = _tee_body(flow.response.stream)
+        if response_body is None:
+            response_body = flow.response.raw_content or b""
 
         duration_ms = None
         if flow.request.timestamp_start and flow.response.timestamp_end:
@@ -195,9 +271,9 @@ class SQLiteLogger:
             timestamp=flow.response.timestamp_start or flow.response.timestamp_end,
             status_code=flow.response.status_code,
             headers=flow.response.headers.items(multi=True),
-            body=flow.response.raw_content,
-            bytes_in=len(flow.request.raw_content or b""),
-            bytes_out=len(flow.response.raw_content or b""),
+            body=response_body,
+            bytes_in=len(request_body),
+            bytes_out=len(response_body),
             duration_ms=duration_ms,
         )
         self._db.insert_response(record)

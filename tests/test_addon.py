@@ -441,3 +441,208 @@ def test_connect_consumes_policy_identity_header(tmp_path: Path, monkeypatch) ->
     assert flow.response is not None
     assert "Proxy-Authorization" not in flow.request.headers
     assert _mode_reason_rows(tmp_path) == [("example.com", 1, "deny", "deny-match")]
+
+
+# --- streaming RPCs (gRPC / Connect over HTTP/2) ---------------------------
+
+
+def _rpc_flow(host: str, content_type: str = "application/connect+proto") -> http.HTTPFlow:
+    flow = _flow(host)
+    flow.request.method = "POST"
+    flow.request.http_version = "HTTP/2.0"
+    flow.request.path = "/agent.v1.AgentService/Run"
+    flow.request.headers["content-type"] = content_type
+    flow.request.content = None
+    return flow
+
+
+def _rpc_response(content_type: str = "application/connect+proto") -> http.Response:
+    response = http.Response.make(200, b"", {"content-type": content_type})
+    response.content = None
+    return response
+
+
+def test_streaming_rpc_request_is_streamed_and_logged_up_front(tmp_path: Path, monkeypatch) -> None:
+    """Bidi streams must not be buffered: mitmproxy would wait for END_STREAM forever."""
+    logger = _setup(tmp_path, monkeypatch, {"mode": "open"})
+    with taddons.context(logger):
+        logger.load(None)
+        flow = _rpc_flow("api2.cursor.sh")
+        logger.requestheaders(flow)
+        # Row exists before the request stream ends, so early responses/errors
+        # satisfy the foreign key.
+        assert _rows(tmp_path) == [("POST", "api2.cursor.sh", 0)]
+        logger.done()
+
+    assert flow.request.stream
+    assert flow.response is None
+
+
+def test_grpc_request_is_streamed(tmp_path: Path, monkeypatch) -> None:
+    logger = _setup(tmp_path, monkeypatch, {"mode": "open"})
+    with taddons.context(logger):
+        logger.load(None)
+        flow = _rpc_flow("api2.cursor.sh", "application/grpc+proto")
+        logger.requestheaders(flow)
+        logger.done()
+
+    assert flow.request.stream
+
+
+def test_unary_request_is_not_streamed(tmp_path: Path, monkeypatch) -> None:
+    logger = _setup(tmp_path, monkeypatch, {"mode": "open"})
+    with taddons.context(logger):
+        logger.load(None)
+        flow = _rpc_flow("api2.cursor.sh", "application/proto")
+        logger.requestheaders(flow)
+        logger.done()
+
+    assert not flow.request.stream
+    assert _rows(tmp_path) == []
+
+
+def test_streamed_request_and_response_bodies_are_still_logged(tmp_path: Path, monkeypatch) -> None:
+    logger = _setup(tmp_path, monkeypatch, {"mode": "open"})
+    with taddons.context(logger):
+        logger.load(None)
+        flow = _rpc_flow("api2.cursor.sh")
+        logger.requestheaders(flow)
+        assert flow.request.stream(b"hello ") == b"hello "
+        assert flow.request.stream(b"world") == b"world"
+
+        # Server answers before the client half-closes (bidi).
+        flow.response = _rpc_response()
+        logger.responseheaders(flow)
+        assert flow.response.stream(b"echo") == b"echo"
+
+        flow.request.stream(b"")
+        logger.request(flow)
+        flow.response.stream(b"")
+        logger.response(flow)
+        logger.done()
+
+    conn = sqlite3.connect(tmp_path / "proxy.db")
+    req = conn.execute("SELECT body, blocked FROM http_requests").fetchall()
+    resp = conn.execute("SELECT body, bytes_in, bytes_out FROM http_responses").fetchall()
+    conn.close()
+    assert req == [(b"hello world", 0)]
+    assert resp == [(b"echo", 11, 4)]
+
+
+def test_response_streams_when_request_was_streamed(tmp_path: Path, monkeypatch) -> None:
+    """Even a non-RPC content type must not be buffered on a bidi exchange."""
+    logger = _setup(tmp_path, monkeypatch, {"mode": "open"})
+    with taddons.context(logger):
+        logger.load(None)
+        flow = _rpc_flow("api2.cursor.sh")
+        logger.requestheaders(flow)
+        flow.response = _rpc_response("application/json")
+        logger.responseheaders(flow)
+        logger.done()
+
+    assert flow.response.stream
+
+
+def test_streaming_rpc_response_on_buffered_request_is_streamed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Server-streaming RPCs send a complete request but stream the response."""
+    logger = _setup(tmp_path, monkeypatch, {"mode": "open"})
+    with taddons.context(logger):
+        logger.load(None)
+        flow = _flow("api2.cursor.sh")
+        logger.request(flow)
+        flow.response = _rpc_response()
+        logger.responseheaders(flow)
+        flow.response.stream(b"chunk")
+        flow.response.stream(b"")
+        logger.response(flow)
+        logger.done()
+
+    conn = sqlite3.connect(tmp_path / "proxy.db")
+    resp = conn.execute("SELECT body FROM http_responses").fetchall()
+    conn.close()
+    assert resp == [(b"chunk",)]
+
+
+def test_plain_response_is_not_streamed(tmp_path: Path, monkeypatch) -> None:
+    logger = _setup(tmp_path, monkeypatch, {"mode": "open"})
+    with taddons.context(logger):
+        logger.load(None)
+        flow = tflow.tflow(resp=True)
+        logger.responseheaders(flow)
+        logger.done()
+
+    assert not flow.response.stream
+
+
+def test_blocked_streaming_rpc_is_killed_not_streamed(tmp_path: Path, monkeypatch) -> None:
+    """A 403 can only be sent after the client ends its stream, so reset it instead."""
+    logger = _setup(tmp_path, monkeypatch, {"mode": "deny", "deny": ["api2.cursor.sh"]})
+    with taddons.context(logger):
+        logger.load(None)
+        flow = _rpc_flow("api2.cursor.sh")
+        logger.requestheaders(flow)
+        logger.done()
+
+    assert not flow.request.stream
+    assert flow.error is not None
+    assert not flow.live
+    conn = sqlite3.connect(tmp_path / "proxy.db")
+    rows = conn.execute("SELECT method, host, blocked, block_reason FROM http_requests").fetchall()
+    conn.close()
+    assert rows == [("POST", "api2.cursor.sh", 1, "deny-match")]
+
+
+def test_blocked_streaming_rpc_stays_blocked_when_logging_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
+    logger = _setup(tmp_path, monkeypatch, {"mode": "deny", "deny": ["api2.cursor.sh"]})
+    with taddons.context(logger):
+        logger.load(None)
+        monkeypatch.setattr(
+            logger._db,
+            "insert_request",
+            lambda record: (_ for _ in ()).throw(RuntimeError("db full")),
+        )
+        flow = _rpc_flow("api2.cursor.sh")
+        with contextlib.suppress(RuntimeError):
+            logger.requestheaders(flow)
+        logger.done()
+
+    assert not flow.request.stream
+    assert not flow.live
+
+
+def test_streaming_rpc_consumes_policy_identity_before_forwarding(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Streamed headers go upstream right after requestheaders: strip creds there."""
+    logger = _setup(tmp_path, monkeypatch, {"mode": "open"})
+    with taddons.context(logger):
+        logger.load(None)
+        flow = _rpc_flow("api2.cursor.sh")
+        token = base64.b64encode(f"vp-{'a' * 32}:x".encode()).decode()
+        flow.request.headers["Proxy-Authorization"] = f"Basic {token}"
+        logger.requestheaders(flow)
+        logger.done()
+
+    assert "Proxy-Authorization" not in flow.request.headers
+
+
+def test_streamed_request_end_does_not_reevaluate_policy(tmp_path: Path, monkeypatch) -> None:
+    """The request hook fires after the body was forwarded; it must only log."""
+    logger = _setup(tmp_path, monkeypatch, {"mode": "open"})
+    with taddons.context(logger):
+        logger.load(None)
+        flow = _rpc_flow("api2.cursor.sh")
+        logger.requestheaders(flow)
+        (tmp_path / "filter.json").write_text(
+            json.dumps({"mode": "deny", "deny": ["api2.cursor.sh"]})
+        )
+        flow.request.stream(b"")
+        logger.request(flow)
+        logger.done()
+
+    assert flow.response is None
+    assert _rows(tmp_path) == [("POST", "api2.cursor.sh", 0)]

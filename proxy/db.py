@@ -187,6 +187,27 @@ class ProxyDB:
         )
         self._conn.commit()
 
+    def finish_streamed_request(
+        self,
+        request_id: str,
+        *,
+        body: bytes,
+        server_ip: str | None,
+        server_port: int | None,
+    ) -> None:
+        """Fill in what a streamed request only knows once its stream ends.
+
+        UPDATE, not INSERT OR REPLACE: REPLACE deletes the row first, which
+        responses that arrived mid-stream would block via the foreign key.
+        """
+        self._conn.execute(
+            "UPDATE http_requests SET body = ?, "
+            "server_ip = COALESCE(?, server_ip), server_port = COALESCE(?, server_port) "
+            "WHERE id = ?",
+            (body, server_ip, server_port, request_id),
+        )
+        self._conn.commit()
+
     def insert_response(self, record: ResponseRecord) -> None:
         self._conn.execute(
             "INSERT INTO http_responses "
