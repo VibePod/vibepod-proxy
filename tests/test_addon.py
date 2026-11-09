@@ -544,7 +544,8 @@ def test_response_streams_when_request_was_streamed(tmp_path: Path, monkeypatch)
 
 
 def test_streaming_rpc_response_on_buffered_request_is_streamed(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path,
+    monkeypatch,
 ) -> None:
     """Server-streaming RPCs send a complete request but stream the response."""
     logger = _setup(tmp_path, monkeypatch, {"mode": "open"})
@@ -595,7 +596,8 @@ def test_blocked_streaming_rpc_is_killed_not_streamed(tmp_path: Path, monkeypatc
 
 
 def test_blocked_streaming_rpc_stays_blocked_when_logging_fails(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path,
+    monkeypatch,
 ) -> None:
     logger = _setup(tmp_path, monkeypatch, {"mode": "deny", "deny": ["api2.cursor.sh"]})
     with taddons.context(logger):
@@ -615,7 +617,8 @@ def test_blocked_streaming_rpc_stays_blocked_when_logging_fails(
 
 
 def test_streaming_rpc_consumes_policy_identity_before_forwarding(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path,
+    monkeypatch,
 ) -> None:
     """Streamed headers go upstream right after requestheaders: strip creds there."""
     logger = _setup(tmp_path, monkeypatch, {"mode": "open"})
@@ -638,7 +641,7 @@ def test_streamed_request_end_does_not_reevaluate_policy(tmp_path: Path, monkeyp
         flow = _rpc_flow("api2.cursor.sh")
         logger.requestheaders(flow)
         (tmp_path / "filter.json").write_text(
-            json.dumps({"mode": "deny", "deny": ["api2.cursor.sh"]})
+            json.dumps({"mode": "deny", "deny": ["api2.cursor.sh"]}),
         )
         flow.request.stream(b"")
         logger.request(flow)

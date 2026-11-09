@@ -180,7 +180,10 @@ class SQLiteLogger:
             # Already filtered and logged in requestheaders.
             server_ip, server_port = self._server_address(flow)
             self._db.finish_streamed_request(
-                flow.id, body=body, server_ip=server_ip, server_port=server_port
+                flow.id,
+                body=body,
+                server_ip=server_ip,
+                server_port=server_port,
             )
             return
 
