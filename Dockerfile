@@ -3,6 +3,7 @@ FROM python:3.11-slim
 WORKDIR /app
 
 LABEL io.vibepod.proxy.policy-schema="2"
+LABEL io.vibepod.proxy.version="0.6.0"
 
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
