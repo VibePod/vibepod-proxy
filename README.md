@@ -64,6 +64,17 @@ existed have `NULL` in both.
 
 Additional environment variable: `PROXY_FILTER_PATH` (default `/data/filter.json`).
 
+## Streaming RPCs
+
+Bodies are normally buffered in full before being forwarded. Requests and
+responses with a streaming RPC content type (`application/grpc*`,
+`application/connect+*` — e.g. Cursor's agent over HTTP/2) are streamed
+instead, since bidirectional calls would otherwise deadlock. Their bodies are
+still logged once each side's stream ends. The request row is written when the
+headers arrive and is filtered there; a blocked streaming request has its
+stream reset instead of getting a `403`, since a response can't be sent before
+the client finishes sending.
+
 ## License
 
 MIT — see [LICENSE](LICENSE)
