@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import logging
 import os
 import re
 from pathlib import Path
@@ -13,6 +14,8 @@ from container import ContainerMetadata, ContainerResolver
 from db import ProxyDB, get_db_path
 from mitmproxy import ctx, http, websocket
 from policy import FilterDecision, PolicyStore
+
+logger = logging.getLogger(__name__)
 
 # NOTE: mitmproxy runs this file as a script module that is absent from
 # sys.modules, which breaks @dataclass on classes with string annotations.
@@ -179,12 +182,14 @@ class SQLiteLogger:
         if body is not None:
             # Already filtered and logged in requestheaders.
             server_ip, server_port = self._server_address(flow)
-            self._db.finish_streamed_request(
+            found = self._db.finish_streamed_request(
                 flow.id,
                 body=body,
                 server_ip=server_ip,
                 server_port=server_port,
             )
+            if not found:
+                logger.warning("No logged request row for streamed flow %s", flow.id)
             return
 
         # flow.request.host is the real connection target; pretty_host prefers

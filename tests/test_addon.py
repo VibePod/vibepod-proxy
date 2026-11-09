@@ -529,6 +529,34 @@ def test_streamed_request_and_response_bodies_are_still_logged(tmp_path: Path, m
     assert resp == [(b"echo", 11, 4)]
 
 
+def test_response_before_request_end_gets_full_bytes_in(tmp_path: Path, monkeypatch) -> None:
+    """A server may end a bidi call before the client half-closes."""
+    logger = _setup(tmp_path, monkeypatch, {"mode": "open"})
+    with taddons.context(logger):
+        logger.load(None)
+        flow = _rpc_flow("api2.cursor.sh")
+        logger.requestheaders(flow)
+        flow.request.stream(b"hello ")
+
+        flow.response = _rpc_response()
+        logger.responseheaders(flow)
+        flow.response.stream(b"bye")
+        flow.response.stream(b"")
+        logger.response(flow)
+
+        flow.request.stream(b"world")
+        flow.request.stream(b"")
+        logger.request(flow)
+        logger.done()
+
+    conn = sqlite3.connect(tmp_path / "proxy.db")
+    req = conn.execute("SELECT body FROM http_requests").fetchall()
+    resp = conn.execute("SELECT body, bytes_in, bytes_out FROM http_responses").fetchall()
+    conn.close()
+    assert req == [(b"hello world",)]
+    assert resp == [(b"bye", 11, 3)]
+
+
 def test_response_streams_when_request_was_streamed(tmp_path: Path, monkeypatch) -> None:
     """Even a non-RPC content type must not be buffered on a bidi exchange."""
     logger = _setup(tmp_path, monkeypatch, {"mode": "open"})
