@@ -75,6 +75,13 @@ headers arrive and is filtered there; a blocked streaming request has its
 stream reset instead of getting a `403`, since a response can't be sent before
 the client finishes sending.
 
+## Image labels
+
+The image carries `io.vibepod.proxy.policy-schema` (filter policy format) and
+`io.vibepod.proxy.version` (release version). VibePod CLI checks both before
+using a proxy image, so bump the version label in the `Dockerfile` with every
+release tag.
+
 ## License
 
 MIT — see [LICENSE](LICENSE)
